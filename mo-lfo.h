@@ -22,8 +22,8 @@
 
 #define LFO_SINE_TABLE_SIZE (1u << LFO_SINE_TABLE_BITS)
 
-#ifndef mo-lfo_h
-#define mo-lfo_h
+#ifndef mo_lfo_h
+#define mo_lfo_h
 
 
 class lfo
