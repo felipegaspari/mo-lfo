@@ -1,6 +1,7 @@
 //----------------------------------//
 // LFO class for Arduino
 // by mo-thunderz
+// modified by felipegaspari
 // version 1.1
 // last update: 29.12.2020
 //----------------------------------//
@@ -21,8 +22,8 @@
 
 #define LFO_SINE_TABLE_SIZE (1u << LFO_SINE_TABLE_BITS)
 
-#ifndef lfo_h
-#define lfo_h
+#ifndef mo-lfo_h
+#define mo-lfo_h
 
 
 class lfo

@@ -7,7 +7,7 @@
 
 
 #include "Arduino.h"
-#include "lfo.h"
+#include "mo-lfo.h"
 #include <math.h>
 
 // -----------------------------------------------
