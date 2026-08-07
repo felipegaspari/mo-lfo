@@ -1,10 +1,9 @@
 //----------------------------------//
 // LFO class for Arduino
 // by mo-thunderz
-// version 1.1
-// last update: 22.05.2021
+// modified by felipegaspari
+// version 1.3
 //----------------------------------//
-
 
 #include "Arduino.h"
 #include "mo-lfo.h"
@@ -14,14 +13,12 @@
 // Internal helpers (file-local)
 // -----------------------------------------------
 
-// Convert frequency in Hz to phase increment per microsecond for 32-bit phase
 static uint32_t lfo_compute_phase_inc_from_freq(float freq_hz)
 {
     if (freq_hz <= 0.0f)
         return 0;
 
-    // 2^32 / 1'000'000  (cycles -> phase ticks per microsecond)
-    const double scale = 4294.967296; // ~= (double)UINT32_MAX + 1 / 1e6
+    const double scale = 4294.967296; // 2^32 / 1e6
     double v = (double)freq_hz * scale;
     if (v < 0.0)
         v = 0.0;
@@ -31,7 +28,6 @@ static uint32_t lfo_compute_phase_inc_from_freq(float freq_hz)
     return (uint32_t)(v + 0.5);
 }
 
-// Simple sine lookup table, initialized once at runtime
 static int16_t s_sineTable[LFO_SINE_TABLE_SIZE];
 static bool s_sineTableInitialized = false;
 
@@ -49,47 +45,121 @@ static void lfo_initSineTable()
     s_sineTableInitialized = true;
 }
 
+static inline int32_t lfo_sine_q15_from_ramp16(uint16_t ramp16)
+{
+    const uint16_t idx  = (uint16_t)(ramp16 >> LFO_SINE_FRAC_BITS);
+    const uint16_t frac = (uint16_t)(ramp16 & ((1u << LFO_SINE_FRAC_BITS) - 1u));
+    const int16_t y0 = s_sineTable[idx];
+    const int16_t y1 = s_sineTable[(idx + 1u) & (LFO_SINE_TABLE_SIZE - 1u)];
+    return (int32_t)y0 + ((((int32_t)y1 - (int32_t)y0) * (int32_t)frac) >> LFO_SINE_FRAC_BITS);
+}
+
+static inline int16_t lfo_clamp_q15(int32_t v)
+{
+    if (v > (int32_t)MO_LFO_Q15_ONE)
+        return MO_LFO_Q15_ONE;
+    if (v < -(int32_t)MO_LFO_Q15_ONE)
+        return (int16_t)(-MO_LFO_Q15_ONE);
+    return (int16_t)v;
+}
+
+// Phase-aligned unit shapes (sine-native): phase 0 = 0 crossing, rising.
+static inline int32_t lfo_unit_q15_from_ramp(uint16_t ramp16, int waveForm)
+{
+    switch (waveForm)
+    {
+        case 1: // Saw: 0 → +peak → jump → -peak → 0
+        {
+            if (ramp16 < 0x8000u)
+                return (int32_t)ramp16;
+            return (int32_t)ramp16 - 65536;
+        }
+        case 2: // Triangle
+        {
+            const uint16_t r = (uint16_t)(ramp16 + 0x4000u);
+            const uint16_t tri16 = (r & 0x8000u) ? (uint16_t)(0xFFFFu - r) : r;
+            return ((int32_t)tri16 * 2) - 32768;
+        }
+        case 3: // Sin
+            return lfo_sine_q15_from_ramp16(ramp16);
+        case 4: // Square
+        default:
+            return (ramp16 & 0x8000u) ? -(int32_t)MO_LFO_Q15_ONE
+                                      : (int32_t)MO_LFO_Q15_ONE;
+    }
+}
+
 // -----------------------------------------------
 // lfo class implementation
 // -----------------------------------------------
 
 lfo::lfo(int dacSize)
 {
-    _dacSize      = dacSize;
-    _ampl         = dacSize - 1;
-    _ampl_offset  = 0;
+    _dacSize     = (dacSize > 1) ? dacSize : 2;
+    _ampl        = _dacSize - 1;
+    _ampl_offset = 0;
+    _ampl_q15    = MO_LFO_Q15_ONE;
 
-    // Initialize sine lookup table (once)
     lfo_initSineTable();
-
-    // Precompute phase increments for default parameters
     _updatePhaseIncFree();
     _updatePhaseIncSync();
 }
 
 void lfo::setWaveForm(int l_waveForm)
 {
-    if(l_waveForm < 0)
+    if (l_waveForm < 0)
         l_waveForm = 0;
-    if(l_waveForm > 4)
+    if (l_waveForm > 4)
         l_waveForm = 4;
     _waveForm = l_waveForm;
 }
 
 void lfo::setAmpl(int l_ampl)
 {
-    if(l_ampl < 0)
+    if (l_ampl < 0)
         l_ampl = 0;
-    if(l_ampl >= _dacSize)
+    if (l_ampl >= _dacSize)
         l_ampl = _dacSize - 1;
     _ampl = l_ampl;
+    _updateAmplQ15FromDac();
+}
+
+void lfo::setAmplQ15(int16_t l_ampl_q15)
+{
+    if (l_ampl_q15 < 0)
+        l_ampl_q15 = 0;
+    if (l_ampl_q15 > MO_LFO_Q15_ONE)
+        l_ampl_q15 = MO_LFO_Q15_ONE;
+    _ampl_q15 = l_ampl_q15;
+
+    const int ampl_max = _dacSize - 1;
+    if (ampl_max > 0)
+        _ampl = (int)(((int32_t)_ampl_q15 * ampl_max + (MO_LFO_Q15_ONE / 2)) / MO_LFO_Q15_ONE);
+    else
+        _ampl = 0;
+}
+
+void lfo::_updateAmplQ15FromDac()
+{
+    const int ampl_max = _dacSize - 1;
+    if (ampl_max <= 0)
+    {
+        _ampl_q15 = 0;
+        return;
+    }
+    if (_ampl >= ampl_max)
+    {
+        _ampl_q15 = MO_LFO_Q15_ONE;
+        return;
+    }
+    _ampl_q15 = (int16_t)(((int32_t)_ampl * (int32_t)MO_LFO_Q15_ONE) / ampl_max);
 }
 
 void lfo::setAmplOffset(int l_ampl_offset)
 {
-    if(l_ampl_offset < 0)
+    if (l_ampl_offset < 0)
         l_ampl_offset = 0;
-    if(l_ampl_offset >= _dacSize)
+    if (l_ampl_offset >= _dacSize)
         l_ampl_offset = _dacSize - 1;
     _ampl_offset = l_ampl_offset;
 }
@@ -101,7 +171,7 @@ void lfo::setMode(bool l_mode)
 
 void lfo::setMode0Freq(float l_mode0_freq)
 {
-    if(l_mode0_freq < 0)
+    if (l_mode0_freq < 0)
         l_mode0_freq = 0;
     _mode0_freq = l_mode0_freq;
     _updatePhaseIncFree();
@@ -109,18 +179,16 @@ void lfo::setMode0Freq(float l_mode0_freq)
 
 void lfo::setMode0Freq(float l_mode0_freq, unsigned long l_t)
 {
-    (void)l_t; // timestamp ignored for speed; no phase continuity on freq change
-
-    if(l_mode0_freq < 0)
+    (void)l_t;
+    if (l_mode0_freq < 0)
         l_mode0_freq = 0;
-
     _mode0_freq = l_mode0_freq;
     _updatePhaseIncFree();
 }
 
 void lfo::setMode1Bpm(float l_mode1_bpm)
 {
-    if(l_mode1_bpm < 0)
+    if (l_mode1_bpm < 0)
         l_mode1_bpm = 0;
     _mode1_bpm = l_mode1_bpm;
     _updatePhaseIncSync();
@@ -128,7 +196,7 @@ void lfo::setMode1Bpm(float l_mode1_bpm)
 
 void lfo::setMode1Rate(float l_mode1_rate)
 {
-    if(l_mode1_rate < 0)
+    if (l_mode1_rate < 0)
         l_mode1_rate = 0;
     _mode1_rate = l_mode1_rate;
     _updatePhaseIncSync();
@@ -136,138 +204,90 @@ void lfo::setMode1Rate(float l_mode1_rate)
 
 void lfo::setMode1Phase(float l_mode1_phase_offset)
 {
-    (void)l_mode1_phase_offset; // phase offset not used in this configuration
+    (void)l_mode1_phase_offset;
 }
 
 void lfo::sync(unsigned long l_t)
 {
-    // Reset timestamp and phase to zero (no phase offset handling)
     _t_last      = l_t;
     _initialized = true;
     _phase       = 0;
 }
 
-int lfo::getWaveForm()
-{
-    return _waveForm;
-}
-
-int lfo::getAmpl()
-{
-    return _ampl;
-}
-
-int lfo::getAmplOffset()
-{
-    return _ampl_offset;
-}
-
-bool lfo::getMode()
-{
-    return _mode;
-}
-
-float lfo::getMode0Freq()
-{
-    return _mode0_freq;
-}
-
-float lfo::getMode1Rate()
-{
-    return _mode1_rate;
-}
+int lfo::getWaveForm() { return _waveForm; }
+int lfo::getAmpl() { return _ampl; }
+int lfo::getAmplOffset() { return _ampl_offset; }
+bool lfo::getMode() { return _mode; }
+float lfo::getMode0Freq() { return _mode0_freq; }
+float lfo::getMode1Rate() { return _mode1_rate; }
 
 float lfo::getPhase()
 {
-    // Return normalized phase in [0,1)
     return (float)_phase * (1.0f / 4294967296.0f);
 }
 
-int lfo::getWave(unsigned long l_t)
+int32_t lfo::_advanceUnitQ15(unsigned long l_t)
 {
-    int result = 0;
-    int l_ampl = _ampl;
-
-    // Initialize timestamp on first call
     if (!_initialized)
     {
         _t_last = l_t;
         _initialized = true;
     }
 
-    // Advance phase based on elapsed time in microseconds
-    uint32_t dt = (uint32_t)(l_t - _t_last);
+    const uint32_t dt = (uint32_t)(l_t - _t_last);
     _t_last = l_t;
 
-    uint32_t phase_inc = _mode ? _phase_inc_sync : _phase_inc_free;
-    _phase += phase_inc * dt; // natural 32-bit wrap-around
+    const uint32_t phase_inc = _mode ? _phase_inc_sync : _phase_inc_free;
+    _phase += phase_inc * dt;
 
-    // Compute correct _ampl_offsetoffset (wave not to exceed 0 to dacSize)
-    int l_ampl_offset = 0;
-    int l_ampl_half   = (int) l_ampl / 2;
-    if(_ampl_offset < _dacSize / 2)
-        l_ampl_offset = ( _ampl_offset > l_ampl_half ) ? _ampl_offset : l_ampl_half;                                                // l_ampl_offset must be large enough not to go below 0
-    else
-        l_ampl_offset = ( _dacSize - _ampl_offset > l_ampl_half ) ? _ampl_offset : _dacSize - l_ampl_half - 1;
+    if (_waveForm == 0)
+        return 0;
 
-    // 16-bit ramp derived from phase (0..65535)
-    uint16_t ramp16 = (uint16_t)(_phase >> 16);
-
-    switch(_waveForm)
-    {
-        case 0: // Off
-            result = _ampl_offset;
-            return result;
-            break;
-        case 1: // Saw
-        {
-            // Descending saw from +ampl/2 to -ampl/2
-            uint32_t inv_ramp = (uint32_t)(0xFFFFu - ramp16);              // 0..65535
-            int32_t scaled    = (int32_t)(inv_ramp * (uint32_t)l_ampl);    // up to ~2.8e9, but we only care modulo >> 16
-            scaled >>= 16;                                                 // 0..l_ampl
-            result = (int)scaled + l_ampl_offset - l_ampl_half;
-            return result;
-        }
-            break;
-        case 2: // Triangle
-        {
-            // Triangle from -ampl/2 to +ampl/2 using folded ramp
-            uint16_t tri16 = (ramp16 & 0x8000u) ? (uint16_t)(0xFFFFu - ramp16) : ramp16; // 0..32767
-            int32_t scaled = (int32_t)tri16 * (int32_t)l_ampl;
-            scaled >>= 15;                                                                // 0..l_ampl
-            result = (int)scaled + l_ampl_offset - l_ampl_half;
-            return result;
-        }
-            break;
-        case 3: // Sin
-        {
-            // Sine using lookup table: value in [-32767, 32767]
-            // Use top LFO_SINE_TABLE_BITS bits of ramp16 as index
-            uint16_t idx     = (uint16_t)(ramp16 >> (16 - LFO_SINE_TABLE_BITS));
-            int16_t s        = s_sineTable[idx];
-            int32_t scaled   = (int32_t)l_ampl_half * (int32_t)s;
-            scaled >>= 15;                            // scale back to amplitude
-            result = (int)scaled + l_ampl_offset;
-            return result;
-        }
-            break;
-        case 4: // Square
-        {
-            // MSB of ramp16 selects polarity
-            if (ramp16 & 0x8000u)
-                result = l_ampl_offset - l_ampl_half;
-            else
-                result = l_ampl_offset + l_ampl_half;
-            return result;
-        }
-            break;
-    }
-    return result;
+    const uint16_t ramp16 = (uint16_t)(_phase >> 16);
+    return lfo_clamp_q15(lfo_unit_q15_from_ramp(ramp16, _waveForm));
 }
 
-// -----------------------------------------------
-// Internal helpers
-// -----------------------------------------------
+int16_t lfo::getWaveQ15(unsigned long l_t)
+{
+    if (_ampl_q15 == 0)
+    {
+        (void)_advanceUnitQ15(l_t); // keep phase moving even at zero amp
+        return 0;
+    }
+
+    const int32_t unit_q15 = _advanceUnitQ15(l_t);
+    if (_waveForm == 0)
+        return 0;
+
+    if (_ampl_q15 == MO_LFO_Q15_ONE)
+        return (int16_t)unit_q15;
+
+    const int32_t out = (int32_t)(((int64_t)unit_q15 * (int64_t)_ampl_q15) >> 15);
+    return lfo_clamp_q15(out);
+}
+
+int lfo::getWave(unsigned long l_t)
+{
+    const int l_ampl = _ampl;
+    const int l_ampl_half = (int)l_ampl / 2;
+
+    int l_ampl_offset = 0;
+    if (_ampl_offset < _dacSize / 2)
+        l_ampl_offset = (_ampl_offset > l_ampl_half) ? _ampl_offset : l_ampl_half;
+    else
+        l_ampl_offset = (_dacSize - _ampl_offset > l_ampl_half) ? _ampl_offset
+                                                                : _dacSize - l_ampl_half - 1;
+
+    if (_waveForm == 0)
+    {
+        (void)_advanceUnitQ15(l_t);
+        return _ampl_offset;
+    }
+
+    const int32_t unit_q15 = _advanceUnitQ15(l_t);
+    const int32_t scaled = ((int32_t)l_ampl_half * unit_q15) >> 15;
+    return (int)scaled + l_ampl_offset;
+}
 
 void lfo::_updatePhaseIncFree()
 {
@@ -276,8 +296,6 @@ void lfo::_updatePhaseIncFree()
 
 void lfo::_updatePhaseIncSync()
 {
-    // Effective LFO frequency in Hz in sync mode:
-    // frequency = _mode1_rate * _mode1_bpm / 60  (same as original implementation)
     float freq_hz = 0.0f;
     if (_mode1_rate > 0.0f && _mode1_bpm > 0.0f)
         freq_hz = (_mode1_rate * _mode1_bpm) / 60.0f;

@@ -1,4 +1,8 @@
 // --------------------------------------------------
+// Legacy Serial demo. Prefer the documented examples:
+//   examples/LFO_example_DAC  (unipolar, default)
+//   examples/LFO_example_Q15  (bipolar Q15 + build flag)
+// --------------------------------------------------
 //
 // LFO - based on micros() function - any Arduino platform
 // by mo_thunderz (mo-thunderz @github)
@@ -11,12 +15,12 @@
 // 3 - sin
 // 4 - square
 // test different vertical resolutions by changing the DACSIZE. For
-// other parameters refer to lfo.h
+// other parameters refer to mo-lfo.h
 //
 // --------------------------------------------------
 
 
-#include <lfo.h>        // required for function generation
+#include <mo-lfo.h>     // required for function generation
 
 #define DACSIZE 4096             // vertical resolution of the DACs
 

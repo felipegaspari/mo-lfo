@@ -1,4 +1,8 @@
 // --------------------------------------------------
+// Legacy LED smoke test. Prefer the documented examples:
+//   examples/LFO_example_DAC  (unipolar, default)
+//   examples/LFO_example_Q15  (bipolar Q15 + build flag)
+// --------------------------------------------------
 //
 // LFO - based on micros() function - Arduino Due
 // by mo_thunderz (mo-thunderz @github)
@@ -10,12 +14,12 @@
 // this example should work on any arduino, although you
 // might need to update the LED_pin if it is not at 13
 //
-// Parameters: please refer to lfo.h
+// Parameters: please refer to mo-lfo.h
 //
 // --------------------------------------------------
 
 
-#include <lfo.h>        // required for function generation
+#include <mo-lfo.h>     // required for function generation
 
 #define DACSIZE 4096             // vertical resolution of the DACs
 
