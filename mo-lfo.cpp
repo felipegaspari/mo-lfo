@@ -226,7 +226,7 @@ float lfo::getPhase()
     return (float)_phase * (1.0f / 4294967296.0f);
 }
 
-int32_t lfo::_advanceUnitQ15(unsigned long l_t)
+int32_t MO_LFO_HOT(lfo::_advanceUnitQ15)(unsigned long l_t)
 {
     if (!_initialized)
     {
@@ -244,10 +244,11 @@ int32_t lfo::_advanceUnitQ15(unsigned long l_t)
         return 0;
 
     const uint16_t ramp16 = (uint16_t)(_phase >> 16);
-    return lfo_clamp_q15(lfo_unit_q15_from_ramp(ramp16, _waveForm));
+    // Shapes are in-range by construction; clamp only after amp scale in getWaveQ15.
+    return lfo_unit_q15_from_ramp(ramp16, _waveForm);
 }
 
-int16_t lfo::getWaveQ15(unsigned long l_t)
+int16_t MO_LFO_HOT(lfo::getWaveQ15)(unsigned long l_t)
 {
     if (_ampl_q15 == 0)
     {

@@ -24,6 +24,8 @@ For synth modulation buses (bipolar ±1.0 as Q15), use **`LFO_example_Q15`**.
 3. Select your board and upload — **no extra build flags** required.
 4. Without a DAC: open **Serial Plotter** at 115200 baud.
 
+`MO_LFO_SRAM_HOT` (library default **0**) only pins the **Q15** engine (`getWaveQ15` / `_advanceUnitQ15`), not `getWave()`. This sketch uses the DAC path; leave the flag off unless you also call Q15. On RP2040: `-DMO_LFO_SRAM_HOT=1` or uncomment the define in the `.ino`.
+
 ### Optional: 12-bit Due-style range on other boards
 
 Edit the sketch (or define before compile):
@@ -44,4 +46,4 @@ Match `analogWriteResolution()` / PWM range to the same size.
 | `setMode(false)` + `setMode0Freq(Hz)` | Free-running |
 | `getWave(micros())` | Next sample (`int`) |
 
-See also: `LFO_example_Q15` for bipolar Q15 + `applyDepthQ24`.
+See also: `LFO_example_Q15` for bipolar Q15 (+ local depth helper).

@@ -16,6 +16,7 @@
 // 4 - square
 // test different vertical resolutions by changing the DACSIZE. For
 // other parameters refer to mo-lfo.h
+// MO_LFO_SRAM_HOT defaults to 0 (see library README). Leave off in this legacy demo.
 //
 // --------------------------------------------------
 

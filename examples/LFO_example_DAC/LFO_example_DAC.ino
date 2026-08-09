@@ -32,6 +32,7 @@
 // Prefer this sketch over the older LFO_example / LED / no_dac demos.
 // =============================================================================
 
+// #define MO_LFO_SRAM_HOT 1   // RP2040: pins Q15 engine only, not getWave() (library default 0)
 #include <mo-lfo.h>
 
 // Vertical resolution: must match your output path.

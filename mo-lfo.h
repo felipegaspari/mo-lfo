@@ -27,12 +27,31 @@
 #define MO_LFO_USE_Q15 0
 #endif
 
+// 1 = RP2040 __not_in_flash_func on getWaveQ15 + _advanceUnitQ15 (define before include).
+// 0 = portable / flash (library default). No-op if the attribute is missing (AVR).
+#ifndef MO_LFO_SRAM_HOT
+#define MO_LFO_SRAM_HOT 0
+#endif
+#if MO_LFO_SRAM_HOT
+#ifndef __not_in_flash_func
+#define __not_in_flash_func(fn) fn
+#endif
+#define MO_LFO_HOT(fn) __not_in_flash_func(fn)
+#else
+#define MO_LFO_HOT(fn) fn
+#endif
+
 #ifndef MO_LFO_CONFIG_REPORTED
 #define MO_LFO_CONFIG_REPORTED
 #if MO_LFO_USE_Q15
 #pragma message("MO-LFO: preferred path=Q15 (MO_LFO_USE_Q15=1); API always has getWave+getWaveQ15")
 #else
 #pragma message("MO-LFO: preferred path=DAC (MO_LFO_USE_Q15=0); API always has getWave+getWaveQ15")
+#endif
+#if MO_LFO_SRAM_HOT
+#pragma message("MO-LFO: SRAM hot path ON (MO_LFO_SRAM_HOT=1) — getWaveQ15/_advanceUnitQ15 .time_critical")
+#else
+#pragma message("MO-LFO: SRAM hot path OFF (MO_LFO_SRAM_HOT=0) — library default")
 #endif
 #endif
 
@@ -80,12 +99,6 @@ class lfo
         // Shared engine, two outputs (fixed signatures — always available):
         int getWave(unsigned long l_t);              // unipolar [0, dacSize-1]
         int16_t getWaveQ15(unsigned long l_t);       // bipolar Q15 ±32767
-
-        // (wave_q15 * depth_q24) >> 15
-        static inline int32_t applyDepthQ24(int16_t wave_q15, int32_t depth_q24)
-        {
-            return (int32_t)(((int64_t)wave_q15 * (int64_t)depth_q24) >> 15);
-        }
 
     private:
         int             _dacSize;

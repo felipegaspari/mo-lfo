@@ -15,6 +15,7 @@
 // might need to update the LED_pin if it is not at 13
 //
 // Parameters: please refer to mo-lfo.h
+// MO_LFO_SRAM_HOT defaults to 0 (see library README). Leave off in this legacy demo.
 //
 // --------------------------------------------------
 
