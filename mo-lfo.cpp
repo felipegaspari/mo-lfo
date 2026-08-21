@@ -1,8 +1,8 @@
 /**
  * @file mo-lfo.cpp
- * @brief Implementation of the LFO class and DSP waveform generators.
+ * @brief Low Frequency Oscillator implementation with fixed-point math and SRAM optimization.
  * @author mo-thunderz
- * @author felipegaspari (modified & expanded)
+ * @author felipegaspari (modified & optimized)
  * @version 1.5
  */
 
@@ -15,16 +15,16 @@
  // -----------------------------------------------
  
  /**
-  * @brief Computes the 32-bit phase increment per microsecond for a given frequency in Hz.
+  * @brief Computes 32-bit phase increment per microsecond given a frequency in Hz.
   * @param freq_hz Frequency in Hertz.
-  * @return 32-bit phase accumulator step per microsecond.
+  * @return uint32_t Phase increment for 32-bit accumulator.
   */
  static uint32_t lfo_compute_phase_inc_from_freq(float freq_hz)
  {
      if (freq_hz <= 0.0f)
          return 0;
  
-     const double scale = 4294.967296; // 2^32 / 1e6 us
+     const double scale = 4294.967296; // 2^32 / 1e6
      double v = (double)freq_hz * scale;
      if (v < 0.0)
          v = 0.0;
@@ -34,12 +34,12 @@
      return (uint32_t)(v + 0.5);
  }
  
- /** @brief Sine lookup table storage in Q15 format. */
+ /** @brief Sine lookup table storage in RAM (.bss). */
  static int16_t s_sineTable[LFO_SINE_TABLE_SIZE];
  static bool s_sineTableInitialized = false;
  
  /**
-  * @brief Pre-calculates the static sine lookup table if not already populated.
+  * @brief Generates sine lookup table samples using standard math library on first boot.
   */
  static void lfo_initSineTable()
  {
@@ -56,11 +56,11 @@
  }
  
  /**
-  * @brief Generates an interpolated sine wave in Q15 from a 16-bit phase ramp.
-  * @param ramp16 Unsigned 16-bit phase accumulator [0 .. 65535].
-  * @return Signed Q15 interpolated sine value [-32767 .. +32767].
+  * @brief Linearly interpolates Q15 sine wave from 16-bit phase ramp.
+  * @param ramp16 Upper 16 bits of the phase accumulator.
+  * @return int32_t Sine value in Q15 range [-32767, +32767].
   */
- static inline int32_t lfo_sine_q15_from_ramp16(uint16_t ramp16)
+ MO_LFO_ALWAYS_INLINE int32_t lfo_sine_q15_from_ramp16(uint16_t ramp16)
  {
      const uint16_t idx  = (uint16_t)(ramp16 >> LFO_SINE_FRAC_BITS);
      const uint16_t frac = (uint16_t)(ramp16 & ((1u << LFO_SINE_FRAC_BITS) - 1u));
@@ -70,114 +70,102 @@
  }
  
  /**
-  * @brief Bounds-checks and hard-clamps values to legal signed Q15 range [-32767 .. +32767].
-  * @param v Input 32-bit value.
-  * @return Clamped 16-bit signed Q15 integer.
+  * @brief Branchless-friendly saturation clamp to valid Q15 boundaries.
+  * @param v Input 32-bit sample.
+  * @return int16_t Clamped value in [-32767, +32767].
   */
- static inline int16_t lfo_clamp_q15(int32_t v)
+ MO_LFO_ALWAYS_INLINE int16_t lfo_clamp_q15(int32_t v)
  {
-     if (v > (int32_t)MO_LFO_Q15_ONE)
-         return MO_LFO_Q15_ONE;
-     if (v < -(int32_t)MO_LFO_Q15_ONE)
-         return (int16_t)(-MO_LFO_Q15_ONE);
-     return (int16_t)v;
+     return v < -(int32_t)MO_LFO_Q15_ONE ? -(int16_t)MO_LFO_Q15_ONE : (v > (int32_t)MO_LFO_Q15_ONE ? MO_LFO_Q15_ONE : (int16_t)v);
  }
  
- /**
-  * @brief Generates phase-aligned unit waveforms in Q15 format.
-  * @details All waveforms are sine-aligned (crossing zero in a rising direction at ramp16 = 0).
-  * @param ramp16 16-bit phase accumulator [0 .. 65535].
-  * @param waveForm Waveform selector index (0..9).
-  * @return Bipolar unit shape in Q15 range [-32767 .. +32767].
-  */
- static inline int32_t lfo_unit_q15_from_ramp(uint16_t ramp16, int waveForm)
+/**
+ * @brief Computes normalized full-scale Q15 unit output for all 10 waveform types.
+ * @param ramp16 Upper 16 bits of phase accumulator (0..65535).
+ * @param waveForm Waveform selector (0..9).
+ * @return int32_t Normalized bipolar shape [-32767, +32767].
+ */
+ MO_LFO_ALWAYS_INLINE int32_t lfo_unit_q15_from_ramp(uint16_t ramp16, int waveForm)
  {
      switch (waveForm)
      {
-         case 1: // Saw: 0 -> +peak -> jump -> -peak -> 0
+         case 1: // Linear Saw: 0 → +peak → jump → -peak → 0
          {
              if (ramp16 < 0x8000u)
                  return (int32_t)ramp16;
              return (int32_t)ramp16 - 65536;
          }
  
-         case 2: // Deformed Analog Triangle (Slewed & Asymmetric, Safe Q15)
-         {
-             // 1. Shift phase so ramp16=0 is the rising zero-crossing
-             uint16_t r = (uint16_t)(ramp16 + 0x3A00u);
- 
-             // 2. Analog asymmetry: 45% rise (0..0x7333), 55% fall (0x7333..0xFFFF)
-             int32_t tri;
-             if (r < 0x7333u) {
-                 tri = (int32_t)(((int64_t)r * 65534) / 0x7333) - 32767;
-             } else {
-                 tri = 32767 - (int32_t)(((int64_t)(r - 0x7333u) * 65534) / (0xFFFFu - 0x7333u));
-             }
- 
-             // 3. Analog Slew Softener: smoothly rounds sharp peaks without sticking at rails
-             // Uses a soft cubic blend: tri - (tri^3 / 5)
-             int32_t x2 = (tri * tri) >> 15;
-             int32_t x3 = (x2 * tri) >> 15;
-             int32_t out = tri - (x3 / 5);
- 
-             // Normalize back to full scale Q15 and clamp safely
-             out = (out * 39321) >> 15;
-             if (out > 32767)  out = 32767;
-             if (out < -32767) out = -32767;
- 
-             return out;
-         }
- 
-         case 3: // Sin
-             return lfo_sine_q15_from_ramp16(ramp16);
- 
-         case 4: // Square
-             return (ramp16 & 0x8000u) ? -(int32_t)MO_LFO_Q15_ONE
-                                       : (int32_t)MO_LFO_Q15_ONE;
- 
-         case 5: // Analog Sharktooth (Asymmetric Saw: 90% rise, 10% fall)
-         {
-             if (ramp16 < 58982u) {
-                 return (int32_t)(((int64_t)ramp16 * 65534) / 58982) - 32767;
-             } else {
-                 return 32767 - (int32_t)(((int64_t)(ramp16 - 58982u) * 65534) / 6553);
-             }
-         }
- 
-         case 6: // Analog Trapezoid (Slewed Square)
+         case 2: // Tri Slewed (Real Analog RC-Curved Triangle)
          {
              const uint16_t r = (uint16_t)(ramp16 + 0x4000u);
              const uint16_t tri16 = (r & 0x8000u) ? (uint16_t)(0xFFFFu - r) : r;
-             int32_t trap = ((int32_t)tri16 * 8) - 131072;
-             if (trap > 32767) return 32767;
-             if (trap < -32767) return -32767;
-             return trap;
+ 
+             // RISING HALF (r < 0x8000): Parabolic capacitor charge curve (shoots up fast, eases into peak)
+             if (!(r & 0x8000u)) {
+                 const uint32_t inv = 32767u - tri16;
+                 const uint32_t curve = (inv * inv) >> 15; // 32767 -> 0
+                 const int32_t val = 32767 - (int32_t)curve; // 0 -> 32767
+                 return (val * 2) - 32768;
+             }
+             // FALLING HALF (r >= 0x8000): Parabolic capacitor discharge curve (drops fast, eases into trough)
+             else {
+                 const uint32_t curve = ((uint32_t)tri16 * (uint32_t)tri16) >> 15; // 32767 -> 0
+                 return ((int32_t)curve * 2) - 32768;
+             }
          }
  
-         case 7: // Linear Triangle (Pure Mathematical Triangle)
+         case 3: // Sine
+             return lfo_sine_q15_from_ramp16(ramp16);
+             
+         case 4: // Linear Square (Instant edge)
+             return (ramp16 & 0x8000u) ? -(int32_t)MO_LFO_Q15_ONE
+                                       : (int32_t)MO_LFO_Q15_ONE;
+                                       
+         case 5: // Sharktooth (90% rise, 10% fall discharge)
+         {
+             if (ramp16 < 58982u) {
+                 return (int32_t)((ramp16 * 72818u) >> 16) - 32767;
+             } else {
+                 const uint32_t inv = 65535u - (uint32_t)ramp16;
+                 return (int32_t)((inv * 655360u) >> 16) - 32767;
+             }
+         }
+         
+         case 6: // Trapezoid (Pronounced Slewed Square: 6x Overdrive)
+         {
+             const uint16_t r = (uint16_t)(ramp16 + 0x4000u);
+             const uint16_t tri16 = (r & 0x8000u) ? (uint16_t)(0xFFFFu - r) : r;
+             
+             // 6x Overdrive: Holds solid flat rails with a crisp 10% transition ramp
+             const int32_t trap = ((int32_t)tri16 * 6) - 98304;
+             return trap < -32767 ? -32767 : (trap > 32767 ? 32767 : trap);
+         }
+ 
+         case 7: // Linear Tri (Pure sharp linear peaks)
          {
              const uint16_t r = (uint16_t)(ramp16 + 0x4000u);
              const uint16_t tri16 = (r & 0x8000u) ? (uint16_t)(0xFFFFu - r) : r;
              return ((int32_t)tri16 * 2) - 32768;
          }
- 
-         case 8: // Stepped Staircase (Quantized Triangle, 8 levels)
+         
+         case 8: // Staircase (Quantized Triangle, 8 levels)
          {
              const uint16_t r = (uint16_t)(ramp16 + 0x4000u);
              const uint16_t tri16 = (r & 0x8000u) ? (uint16_t)(0xFFFFu - r) : r;
-             uint16_t step = tri16 >> 12;
+             const uint16_t step = tri16 >> 12; // 0..7 discrete steps
              return ((int32_t)step * 9362) - 32767;
          }
- 
-         case 9: // Wavefolded Sine
+         
+         case 9: // Folded Sine (Buchla-style overdriven fold)
          {
-             int32_t sine = lfo_sine_q15_from_ramp16(ramp16);
-             int32_t folded = (sine * 3) / 2;
+             const int32_t sine = lfo_sine_q15_from_ramp16(ramp16);
+             int32_t folded = (sine * 3) >> 1; // +50% gain drive
              if (folded > 32767) folded = 65534 - folded;
              else if (folded < -32767) folded = -65534 - folded;
              return folded;
          }
- 
+         
          default:
              return 0;
      }
@@ -345,7 +333,7 @@
  {
      if (_ampl_q15 == 0)
      {
-         (void)_advanceUnitQ15(l_t); // Maintain phase progression even when amplitude is 0
+         (void)_advanceUnitQ15(l_t); // Keep accumulator moving even at zero amplitude
          return 0;
      }
  
