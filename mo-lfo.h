@@ -47,20 +47,34 @@
   * @brief Places critical DSP functions into fast SRAM (.time_critical) on supported MCUs (RP2040, RP2350, STM32).
   *        1 = Enabled (RAM execution), 0 = Disabled (Flash execution).
   */
- #ifndef MO_LFO_SRAM_HOT
- #define MO_LFO_SRAM_HOT 0
- #endif
- 
- #if MO_LFO_SRAM_HOT
- #ifndef __not_in_flash_func
- #define __not_in_flash_func(fn) fn
- #endif
- /** @brief Macro placing function into fast SRAM execution space. */
- #define MO_LFO_HOT(fn) __not_in_flash_func(fn)
- #else
- /** @brief Portable fallback (no SRAM placement). */
- #define MO_LFO_HOT(fn) fn
- #endif
+
+  #ifndef MO_LFO_SRAM_HOT
+  #define MO_LFO_SRAM_HOT 0
+  #endif
+    
+  #if MO_LFO_SRAM_HOT
+  
+    /* ---------- Raspberry Pi Pico / RP2040 / RP2350 ---------- */
+    #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_RP2040) || defined(PICO_RP2350)
+      #ifndef __not_in_flash_func
+        #define __not_in_flash_func(fn) fn
+      #endif
+      #define MO_LFO_HOT(fn) __not_in_flash_func(fn)
+  
+    /* ---------- STM32H7 (ITCM) ---------- */
+    #elif defined(STM32H7) || defined(STM32H750xx) || defined(ARDUINO_ARCH_STM32)
+      /* Place the function in the .itcmram section (must be defined in the linker script) */
+      #define MO_LFO_HOT(fn) __attribute__((section(".itcmram"), noinline, used)) fn
+  
+    /* ---------- Fallback ---------- */
+    #else
+      #define MO_LFO_HOT(fn) fn
+    #endif
+  
+  #else
+    /* Portable fallback (no special placement) */
+    #define MO_LFO_HOT(fn) fn
+  #endif
  
  /**
   * @def MO_LFO_ALWAYS_INLINE

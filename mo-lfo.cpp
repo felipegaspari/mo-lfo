@@ -39,21 +39,42 @@
  static bool s_sineTableInitialized = false;
  
  /**
-  * @brief Generates sine lookup table samples using standard math library on first boot.
+  * @brief Generates sine lookup table samples on first boot.
   */
- static void lfo_initSineTable()
- {
-     if (s_sineTableInitialized)
-         return;
- 
-     for (int i = 0; i < (int)LFO_SINE_TABLE_SIZE; ++i)
-     {
-         double angle = (2.0 * 3.14159265358979323846 * (double)i) / (double)LFO_SINE_TABLE_SIZE;
-         s_sineTable[i] = (int16_t)lrint(sin(angle) * 32767.0);
-     }
- 
-     s_sineTableInitialized = true;
- }
+  static void lfo_initSineTable()
+  {
+      if (s_sineTableInitialized)
+          return;
+  
+      const float inv_size = 1.0f / (float)LFO_SINE_TABLE_SIZE;
+  
+      for (int i = 0; i < (int)LFO_SINE_TABLE_SIZE; ++i)
+      {
+          // Phase mapped to [0.0f, 1.0f)
+          float phase = (float)i * inv_size;
+          float sign = 1.0f;
+  
+          // Fold second half-cycle [0.5, 1.0) to [0.0, 0.5)
+          if (phase >= 0.5f)
+          {
+              phase -= 0.5f;
+              sign = -1.0f;
+          }
+  
+          // Bhaskara I approximation on half-wave [0, pi]:
+          // sin(pi * w) ~= (16 * w * (1 - w)) / (5 - 4 * w * (1 - w))
+          // where w in [0, 1] is (2 * phase)
+          float w = phase * 2.0f;
+          float x = w * (1.0f - w);
+          float s = (16.0f * x) / (5.0f - 4.0f * x);
+  
+          // Scale to signed Q15 range [-32767, +32767] with round-to-nearest
+          float val = sign * s * 32767.0f;
+          s_sineTable[i] = (int16_t)(val + (val >= 0.0f ? 0.5f : -0.5f));
+      }
+  
+      s_sineTableInitialized = true;
+  }
  
  /**
   * @brief Linearly interpolates Q15 sine wave from 16-bit phase ramp.
