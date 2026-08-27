@@ -215,6 +215,11 @@
          float                _ana_mod2_val;
          float                _ana_mod3_val;
          float                _ana_bias_val;
+        // NEW: Fast Q15/Scalar cache for integer-domain analog math
+        int32_t              _ana_mod2_q15;
+        int32_t              _ana_mod3_q15;
+        int32_t              _ana_bias_q15;
+        float                _ana_wobble_drive_float_scalar;
  
          void                 _updatePhaseIncFree();
          void                 _updatePhaseIncSync();
@@ -222,6 +227,10 @@
          void                 _updateAnalogIncrements();
  
          int32_t              _advanceUnitQ15(unsigned long l_t);
+
+
+
+
  };
  
  #endif
