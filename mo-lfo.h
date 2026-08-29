@@ -1,14 +1,6 @@
 /**
  * @file mo-lfo.h
  * @brief Low Frequency Oscillator (LFO) class for Arduino and embedded synthesizers.
- * @author mo-thunderz
- * @author felipegaspari (modified & optimized)
- * @version 1.9
- *
- * @details High-performance LFO engine supporting both integer DAC scaling [0, dacSize-1]
- *          and bipolar fixed-point Q15 [-32767, +32767] output. Features analog modeling
- *          (including 4 dedicated parametric analog sine waveforms), hardware slew
- *          emulations, and non-traditional wavefolded/quantized shapes.
  */
 
  #ifndef mo_lfo_h
@@ -18,8 +10,17 @@
  #include <stdint.h>
  
  // -------------------------------------------------
- // Configuration macros
+ // Configuration macros & Dual Engine Toggle
  // -------------------------------------------------
+ 
+ // NEW: Auto-detect Architecture to switch between Pure FPU and Pure Fixed-Point
+ #ifndef FLOAT_ENGINE
+   #if defined(PICO_RP2350) || defined(ARDUINO_ARCH_RP2350) || defined(__ARM_FP)
+     #define FLOAT_ENGINE 1
+   #else
+     #define FLOAT_ENGINE 0
+   #endif
+ #endif
  
  #ifndef LFO_SINE_TABLE_BITS
  #define LFO_SINE_TABLE_BITS 9
@@ -37,16 +38,13 @@
  #endif
     
  #if MO_LFO_SRAM_HOT
-    /* ---------- Raspberry Pi Pico / RP2040 / RP2350 ---------- */
     #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_RP2040) || defined(PICO_RP2350)
       #ifndef __not_in_flash_func
         #define __not_in_flash_func(fn) fn
       #endif
       #define MO_LFO_HOT(fn) __not_in_flash_func(fn)
-    /* ---------- STM32H7 (ITCM) ---------- */
     #elif defined(STM32H7) || defined(STM32H750xx) || defined(ARDUINO_ARCH_STM32)
       #define MO_LFO_HOT(fn) __attribute__((section(".itcmram"), noinline, used)) fn
-    /* ---------- Fallback ---------- */
     #else
       #define MO_LFO_HOT(fn) fn
     #endif
@@ -64,62 +62,30 @@
  
  static const int16_t MO_LFO_Q15_ONE = 32767;
  
- /**
-  * @struct lfo_analog_profile_t
-  * @brief Complete parameter profile controlling the Analog Sine deformation engine.
-  */
-  struct lfo_analog_profile_t {
-    // ---------------------------------------------------------
-    // ABSOLUTE IMPERFECTIONS (Static Hz, physical hardware models)
-    // ---------------------------------------------------------
-    // Shifted to 0.31 Hz / 2.5% depth so cycle periods vary subtly in time
-    float drift_freq_hz  = 0.31f;  
-    float drift_depth    = 0.025f; 
-    
-    // Wobble breathes between 0.90 and 1.00
-    float wobble_freq_hz = 0.13f;  
-    float wobble_base    = 0.95f; 
-    float wobble_depth   = 0.05f; 
-
-    // ---------------------------------------------------------
-    // PROPORTIONAL SHAPE EVOLUTION (Scales with Main LFO Speed)
-    // ---------------------------------------------------------
-    // Faster, prime ratios make consecutive cycles look and feel distinct:
-    // 2nd Harmonic sweeps every ~4.3 cycles (smooth asymmetrical belly)
-    float mod2_ratio     = 0.23f;  
-    float mod2_base      = 0.04f;  
-    float mod2_depth     = 0.04f; 
-    
-    // 3rd Harmonic kept LOW so it does NOT sharpen into a triangle!
-    // Sweeps every ~2.7 cycles
-    float mod3_ratio     = 0.37f;  
-    float mod3_base      = 0.015f;  
-    float mod3_depth     = 0.015f; 
-
-    // Dynamic DC shift sweeps every ~5.8 cycles (positive vs negative crests alternate height)
-    float bias_ratio     = 0.17f;  
-    float bias_base      = 0.01f; 
-    float bias_depth     = 0.03f;  
-
-    // ---------------------------------------------------------
-    // SATURATION & GAIN STAGING
-    // ---------------------------------------------------------
-    // Drive pushes the wave into the sweet spot (x ≈ 1.32) of the soft clipper
-    float drive          = 1.15f;  
-    
-    // 1.06 scales the soft-clipper output to exactly 99.4% full amplitude (no hard-clipping!)
-    float makeup_gain    = 1.06f;  
-};
-
- /**
-  * @enum LfoAnalogPreset
-  * @brief Factory preset profiles for the analog sine engine.
-  */
+ struct lfo_analog_profile_t {
+     float drift_freq_hz  = 0.31f;  
+     float drift_depth    = 0.025f; 
+     float wobble_freq_hz = 0.13f;  
+     float wobble_base    = 0.95f; 
+     float wobble_depth   = 0.05f; 
+     float mod2_ratio     = 0.23f;  
+     float mod2_base      = 0.04f;  
+     float mod2_depth     = 0.04f; 
+     float mod3_ratio     = 0.37f;  
+     float mod3_base      = 0.015f;  
+     float mod3_depth     = 0.015f; 
+     float bias_ratio     = 0.17f;  
+     float bias_base      = 0.01f; 
+     float bias_depth     = 0.03f;  
+     float drive          = 1.15f;  
+     float makeup_gain    = 1.06f;  
+ };
+ 
  enum class LfoAnalogPreset {
-     SubtleWarmth = 0,   /**< Gentle hardware drift, subtle shape morphing (Waveform 2). */
-     TapeWarble   = 1,   /**< Noticeable tape wow/flutter and magnetic tape saturation (Waveform 10). */
-     ClassATube   = 2,   /**< Heavy 2nd harmonic asymmetry, dynamic DC bias shift, round clipping (Waveform 11). */
-     BrokenVintage= 3    /**< Severe pitch instability, high harmonic grit, heavy overdrive (Waveform 12). */
+     SubtleWarmth = 0,
+     TapeWarble   = 1,
+     ClassATube   = 2,
+     BrokenVintage= 3
  };
  
  class lfo
@@ -132,27 +98,7 @@
          int16_t getAmplQ15() const { return _ampl_q15; }
          void setAmplOffset(int l_ampl_offset);
  
-         /**
-          * @brief Selects the active LFO waveform shape.
-          * 
-          * | Index | UI Name          | Type            | Description / Musical Behavior |
-          * |:-----:|:-----------------|:----------------|:-------------------------------|
-          * | **0** | **Off**          | Static          | Output holds DC offset (0 in Q15, ampl_offset in DAC). |
-          * | **1** | **Saw**          | Standard        | Linear ramp rising from -1.0 to +1.0 with instant reset. |
-          * | **2** | **Analog Sine**  | Analog Model    | Subtle Warmth: gentle drift, mild morphing harmonics. |
-          * | **3** | **Sine**         | Standard        | 512-point table lookup with linear interpolation. |
-          * | **4** | **Square**       | Standard        | 50% duty cycle bipolar pulse with instantaneous edge. |
-          * | **5** | **Sharktooth**   | Analog Model    | 90% linear rise, 10% slewed discharge. Softens harsh clicks. |
-          * | **6** | **Trapezoid**    | Analog Model    | Slewed square wave (3x overdrive). Soft vintage edge. |
-          * | **7** | **Linear Tri**   | Standard        | Pure linear triangle with sharp peak turnarounds. |
-          * | **8** | **Staircase**    | Non-Traditional | 8-step quantized triangle. Perfect for rhythmic S&H and arps. |
-          * | **9** | **Folded Sine**  | Non-Traditional | Buchla-style fold: +50% overdriven sine folding inwards. |
-          * | **10**| **Analog Tape**  | Analog Model    | Tape Warble: strong wow/flutter & magnetic saturation. |
-          * | **11**| **Analog Tube**  | Analog Model    | Class-A Tube: heavy asymmetry, shifting DC bias, round clipping. |
-          * | **12**| **Analog Broken**| Analog Model    | Broken Vintage: severe warble, heavy grit, aggressive overdrive. |
-          */
          void setWaveForm(int l_waveForm);
- 
          void setAnalogProfile(const lfo_analog_profile_t& profile);
          lfo_analog_profile_t getAnalogProfile() const { return _ana_profile; }
          void setAnalogPreset(LfoAnalogPreset preset);
@@ -193,9 +139,6 @@
          unsigned long        _t_last = 0;
          bool                 _initialized = false;
          
-         // ------------------------------------------------
-         // Analog Sine Stateful Variables
-         // ------------------------------------------------
          lfo_analog_profile_t _ana_profile;
          uint32_t             _ana_phase_drift;
          uint32_t             _ana_phase_wobble;
@@ -210,16 +153,28 @@
          uint32_t             _ana_inc_bias;
  
          uint8_t              _ana_counter;
-         float                _ana_drift_val;
-         float                _ana_wobble_val;
-         float                _ana_mod2_val;
-         float                _ana_mod3_val;
-         float                _ana_bias_val;
-        // NEW: Fast Q15/Scalar cache for integer-domain analog math
-        int32_t              _ana_mod2_q15;
-        int32_t              _ana_mod3_q15;
-        int32_t              _ana_bias_q15;
-        float                _ana_wobble_drive_float_scalar;
+        
+         // ------------------------------------------------
+         // Dual Engine State Variables
+         // ------------------------------------------------
+ #if FLOAT_ENGINE
+         // Fast float caches for RP2350 hardware FPU FMA block
+         float                _ana_drift_val_f;
+         float                _ana_fma_fund;
+         float                _ana_fma_h2;
+         float                _ana_fma_h3;
+         float                _ana_fma_bias;
+         float                _ana_sat_c1;
+         float                _ana_sat_c2;
+ #else
+         // Q15/Q14 caches for pure integer RP2040 math
+         int32_t              _ana_drift_depth_q15;
+         int32_t              _ana_mod2_q15;
+         int32_t              _ana_mod3_q15;
+         int32_t              _ana_bias_q15;
+         int32_t              _ana_drive_wobble_q14;
+         int32_t              _ana_makeup_q15;
+ #endif
  
          void                 _updatePhaseIncFree();
          void                 _updatePhaseIncSync();
@@ -227,10 +182,6 @@
          void                 _updateAnalogIncrements();
  
          int32_t              _advanceUnitQ15(unsigned long l_t);
-
-
-
-
  };
  
  #endif
