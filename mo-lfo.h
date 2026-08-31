@@ -1,6 +1,6 @@
 /**
  * @file mo-lfo.h
- * @brief Low Frequency Oscillator (LFO) class for Arduino and embedded synthesizers.
+ * @brief Ultra-Optimized Low Frequency Oscillator (LFO) for RP2350 / RP2040
  */
 
  #ifndef mo_lfo_h
@@ -9,11 +9,6 @@
  #include "Arduino.h"
  #include <stdint.h>
  
- // -------------------------------------------------
- // Configuration macros & Dual Engine Toggle
- // -------------------------------------------------
- 
- // NEW: Auto-detect Architecture to switch between Pure FPU and Pure Fixed-Point
  #ifndef FLOAT_ENGINE
    #if defined(PICO_RP2350) || defined(ARDUINO_ARCH_RP2350) || defined(__ARM_FP)
      #define FLOAT_ENGINE 1
@@ -22,43 +17,21 @@
    #endif
  #endif
  
- #ifndef LFO_SINE_TABLE_BITS
+ // LUT only used for Fixed-Point path
  #define LFO_SINE_TABLE_BITS 9
- #endif
- 
  #define LFO_SINE_TABLE_SIZE (1u << LFO_SINE_TABLE_BITS)
  #define LFO_SINE_FRAC_BITS  (16 - LFO_SINE_TABLE_BITS)
  
- #ifndef MO_LFO_USE_Q15
- #define MO_LFO_USE_Q15 0
- #endif
- 
- #ifndef MO_LFO_SRAM_HOT
- #define MO_LFO_SRAM_HOT 0
- #endif
-    
- #if MO_LFO_SRAM_HOT
-    #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_RP2040) || defined(PICO_RP2350)
-      #ifndef __not_in_flash_func
-        #define __not_in_flash_func(fn) fn
-      #endif
-      #define MO_LFO_HOT(fn) __not_in_flash_func(fn)
-    #elif defined(STM32H7) || defined(STM32H750xx) || defined(ARDUINO_ARCH_STM32)
-      #define MO_LFO_HOT(fn) __attribute__((section(".itcmram"), noinline, used)) fn
-    #else
-      #define MO_LFO_HOT(fn) fn
-    #endif
+ #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_RP2040) || defined(PICO_RP2350)
+   #ifndef __not_in_flash_func
+     #define __not_in_flash_func(fn) fn
+   #endif
+   #define MO_LFO_HOT(fn) __not_in_flash_func(fn)
  #else
-    #define MO_LFO_HOT(fn) fn
+   #define MO_LFO_HOT(fn) fn
  #endif
  
- #ifndef MO_LFO_ALWAYS_INLINE
- #if defined(__GNUC__) || defined(__clang__)
  #define MO_LFO_ALWAYS_INLINE static inline __attribute__((always_inline))
- #else
- #define MO_LFO_ALWAYS_INLINE static inline
- #endif
- #endif
  
  static const int16_t MO_LFO_Q15_ONE = 32767;
  
@@ -123,55 +96,41 @@
          int16_t getWaveQ15(unsigned long l_t);
  
      private:
-         int                  _dacSize;
-         int                  _waveForm = 1;
-         int                  _ampl = 0;
-         int                  _ampl_offset = 0;
-         int16_t              _ampl_q15 = MO_LFO_Q15_ONE;
-         bool                 _mode = 0;
-         float                _mode0_freq = 30;
-         float                _mode1_bpm = 120;
-         float                _mode1_rate = 1;
+         // Cache-Line Aligned Hot Variables (Data-Oriented Grouping)
+         uint32_t             _phase;
+         uint32_t             _ana_active_phase_inc; 
+         uint32_t             _ana_dt_accum;
+         unsigned long        _t_last;
+         uint8_t              _ana_counter;
+         uint8_t              _waveForm;
  
-         uint32_t             _phase = 0;
-         uint32_t             _phase_inc_free = 0;
-         uint32_t             _phase_inc_sync = 0;
-         unsigned long        _t_last = 0;
-         bool                 _initialized = false;
+         // Analog Modulator Array (Triggers LDMIA/STMIA burst loads)
+         uint32_t             _ana_phases[5];
+         uint32_t             _ana_incs[5];
+ 
+         // Standard Path Configuration & State
+         int                  _dacSize;
+         int                  _ampl;
+         int                  _ampl_offset;
+         int16_t              _ampl_q15;
+         bool                 _mode;
+         float                _mode0_freq;
+         float                _mode1_bpm;
+         float                _mode1_rate;
+         uint32_t             _phase_inc_free;
+         uint32_t             _phase_inc_sync;
+         bool                 _initialized;
          
          lfo_analog_profile_t _ana_profile;
-         uint32_t             _ana_phase_drift;
-         uint32_t             _ana_phase_wobble;
-         uint32_t             _ana_phase_mod2;
-         uint32_t             _ana_phase_mod3;
-         uint32_t             _ana_phase_bias;
- 
-         uint32_t             _ana_inc_drift;
-         uint32_t             _ana_inc_wobble;
-         uint32_t             _ana_inc_mod2;
-         uint32_t             _ana_inc_mod3;
-         uint32_t             _ana_inc_bias;
- 
-         uint8_t              _ana_counter;
         
-         // ------------------------------------------------
-         // Dual Engine State Variables
-         // ------------------------------------------------
  #if FLOAT_ENGINE
-         // Fast float caches for RP2350 hardware FPU FMA block
-         float                _ana_drift_val_f;
-         float                _ana_fma_fund;
-         float                _ana_fma_h2;
-         float                _ana_fma_h3;
-         float                _ana_fma_bias;
-         float                _ana_sat_c1;
-         float                _ana_sat_c2;
+         // RP2350 FPU Caches
+         float                _ana_fma_fund, _ana_fma_h2, _ana_fma_h3, _ana_fma_bias;
+         float                _ana_sat_c1, _ana_sat_c2;
  #else
-         // Q15/Q14 caches for pure integer RP2040 math
+         // RP2040 Fixed-Point Caches
          int32_t              _ana_drift_depth_q15;
-         int32_t              _ana_mod2_q15;
-         int32_t              _ana_mod3_q15;
-         int32_t              _ana_bias_q15;
+         int32_t              _ana_mod2_q15, _ana_mod3_q15, _ana_bias_q15;
          int32_t              _ana_drive_wobble_q14;
          int32_t              _ana_makeup_q15;
  #endif
@@ -182,6 +141,7 @@
          void                 _updateAnalogIncrements();
  
          int32_t              _advanceUnitQ15(unsigned long l_t);
+         int32_t              _advanceAnalog(uint32_t dt);
  };
  
  #endif
